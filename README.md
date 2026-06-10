@@ -18,9 +18,8 @@ single `.html` file that's a complete little web page. For example:
 - an [interactive prototype](https://thariqs.github.io/html-effectiveness/08-prototype-interaction.html)
 - a [slide deck](https://thariqs.github.io/html-effectiveness/09-slide-deck.html)
 
-(See [_The unreasonable effectiveness of HTML_](https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html)
-and [these lessons](https://x.com/mattpocockuk/status/2064023481398824993) for more
-on why these have become so common.)
+_See: [_The unreasonable effectiveness of HTML_](https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html)
+and [the `/teach` skill](https://x.com/mattpocockuk/status/2064023481398824993)_
 
 The catch: when the content is confidential, you don't want to publish it on a
 public site. But if you share the raw `.html` file over Slack, Discord, or Google

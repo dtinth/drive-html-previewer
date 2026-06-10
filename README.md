@@ -7,6 +7,31 @@ or sent anywhere else.
 
 👉 **Live app:** https://drive-html-previewer.web.app
 
+## Why?
+
+AI tools like Claude increasingly produce **self-contained HTML artifacts** — a
+single `.html` file that's a complete little web page. For example:
+
+- a [research explainer](https://thariqs.github.io/html-effectiveness/15-research-concept-explainer.html)
+- an [implementation proposal](https://thariqs.github.io/html-effectiveness/16-implementation-plan.html)
+- a [design system](https://thariqs.github.io/html-effectiveness/05-design-system.html)
+- an [interactive prototype](https://thariqs.github.io/html-effectiveness/08-prototype-interaction.html)
+- a [slide deck](https://thariqs.github.io/html-effectiveness/09-slide-deck.html)
+
+(See [_The unreasonable effectiveness of HTML_](https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html)
+and [these lessons](https://x.com/mattpocockuk/status/2064023481398824993) for more
+on why these have become so common.)
+
+The catch: when the content is confidential, you don't want to publish it on a
+public site. But if you share the raw `.html` file over Slack, Discord, or Google
+Drive, the recipient just sees the source code — they have to download it and open
+it in a browser themselves, which is especially clumsy on mobile.
+
+This app fixes that. Upload the HTML file to Google Drive, share it with your
+recipient (so they have Drive access), then paste the file's link here to turn it
+into a clean, viewable URL. Send them that link and they see the rendered page —
+privately, with access still governed by Drive's own permissions.
+
 ## How it works
 
 - Sign in with Google using the narrow **`drive.file`** scope — the app can only

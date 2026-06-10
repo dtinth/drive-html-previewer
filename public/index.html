@@ -239,6 +239,39 @@
 
   .choice button, .choice .btn-link button { white-space: nowrap; }
 
+  /* Paste-a-link card: stacked layout with a full-width input row. */
+  .choice-paste { flex-direction: column; align-items: stretch; }
+
+  .paste-form { display: flex; gap: 8px; }
+  .paste-form input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+  }
+  .paste-form input::placeholder { color: #a8a59b; }
+  .paste-form input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .paste-form button { flex: 0 0 auto; }
+
+  .paste-error {
+    font-size: 12px;
+    color: #a23b2d;
+    text-align: left;
+  }
+  .paste-error code {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: #f7eae7;
+    padding: 1px 4px;
+    border-radius: 4px;
+    word-break: break-all;
+  }
+
   @media (max-width: 460px) {
     .choice { flex-wrap: wrap; }
   }
@@ -303,6 +336,24 @@
     animation: spin .7s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- Loading state ---------- */
+  .loading {
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .loading p { margin: 0; }
+  .spinner-lg {
+    width: 30px; height: 30px;
+    border-width: 3px;
+    margin: 0;
+    vertical-align: baseline;
+  }
 
   .hidden { display: none !important; }
 
@@ -423,6 +474,23 @@
           <button>Download</button>
         </a>
       </div>
+
+      <div class="choice choice-paste" id="pasteChoice">
+        <div class="choice-text">
+          <strong>Have a Google Drive link?</strong>
+          <span>Paste a link to a file someone shared, or to one you uploaded, to turn it into a viewable preview.</span>
+        </div>
+        <form class="paste-form" id="pasteForm">
+          <input type="text" id="pasteInput" inputmode="url" autocomplete="off"
+                 aria-label="Google Drive file link"
+                 placeholder="https://drive.google.com/file/d/…/view" />
+          <button class="primary" type="submit">View</button>
+        </form>
+        <div class="paste-error hidden" id="pasteError">
+          That doesn't look like a Google Drive file link. Try a link like
+          <code>https://drive.google.com/file/d/…/view</code>.
+        </div>
+      </div>
     </div>
 
     <div class="status" id="status"></div>
@@ -457,6 +525,12 @@
       <button id="infoCloseBtn">Close</button>
     </div>
   </dialog>
+
+  <!-- Loading state — shown alone (panel hidden) while a file is being fetched. -->
+  <div class="loading hidden" id="loading">
+    <span class="spinner spinner-lg" aria-hidden="true"></span>
+    <p id="loadingMsg">Loading file…</p>
+  </div>
 
   <!-- Sandboxed render target. NOTE: no allow-same-origin → null origin. -->
   <iframe
@@ -501,6 +575,12 @@
   const driveViewLink   = el("driveViewLink");
   const downloadChoice  = el("downloadChoice");
   const downloadLink    = el("downloadLink");
+  const pasteChoice  = el("pasteChoice");
+  const pasteForm    = el("pasteForm");
+  const pasteInput   = el("pasteInput");
+  const pasteError   = el("pasteError");
+  const loading      = el("loading");
+  const loadingMsg   = el("loadingMsg");
   const infoBtn      = el("infoBtn");
   const infoDialog   = el("infoDialog");
   const infoCloseBtn = el("infoCloseBtn");
@@ -509,6 +589,21 @@
 
   infoBtn.addEventListener("click", () => infoDialog.showModal());
   infoCloseBtn.addEventListener("click", () => infoDialog.close());
+
+  // ---- Paste-a-Drive-link → ?id= ----
+  pasteForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const id = extractFileId(pasteInput.value);
+    if (!id) {
+      pasteError.classList.remove("hidden");
+      pasteInput.focus();
+      return;
+    }
+    // Navigate to the canonical share URL; the page re-inits into the
+    // "Open shared file" flow pointed at this file.
+    location.href = location.pathname + "?id=" + encodeURIComponent(id);
+  });
+  pasteInput.addEventListener("input", () => pasteError.classList.add("hidden"));
 
   // ---- Mobile action menu ----
   function setMenuOpen(open) {
@@ -531,24 +626,32 @@
   brandName.textContent = CFG.APP_NAME || "Drive HTML Viewer";
   document.title = CFG.APP_NAME || "Drive HTML Viewer";
 
-  // ---- Parse a file reference from the share link ----
-  // Accepts:  ?id=FILE_ID
-  //           ?file=<any Drive URL containing /d/FILE_ID/ or ?id=FILE_ID>
-  //           #id=FILE_ID
-  function parseFileIdFromUrl() {
-    const params = new URLSearchParams(location.search);
-    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
-    let raw = params.get("id") || hashParams.get("id") || params.get("file") || "";
+  // ---- Extract a Drive file id from an arbitrary string ----
+  // Handles the common Drive/Docs URL shapes plus a bare id:
+  //   https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+  //   https://docs.google.com/document/d/FILE_ID/edit
+  //   https://drive.google.com/open?id=FILE_ID
+  //   https://drive.google.com/uc?id=FILE_ID&export=download
+  //   FILE_ID
+  function extractFileId(raw) {
     if (!raw) return null;
-    raw = decodeURIComponent(raw);
-    // If a full Drive URL was passed, extract the id.
+    raw = decodeURIComponent(String(raw).trim());
     const dMatch = raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
     if (dMatch) return dMatch[1];
     const qMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]+)/);
     if (qMatch) return qMatch[1];
-    // Otherwise assume the value itself is an id.
+    // Otherwise assume the value itself is an id (no spaces, no slashes).
     if (/^[a-zA-Z0-9_-]+$/.test(raw)) return raw;
     return null;
+  }
+
+  // ---- Parse a file reference from the current URL ----
+  // Accepts:  ?id=FILE_ID  |  ?file=<any Drive URL>  |  #id=FILE_ID
+  function parseFileIdFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const raw = params.get("id") || hashParams.get("id") || params.get("file") || "";
+    return extractFileId(raw);
   }
 
   // ---- State ----
@@ -577,6 +680,9 @@
 
     downloadLink.href = "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(pendingFileId);
     downloadChoice.classList.remove("hidden");
+
+    // The paste-a-link card only belongs on the empty (no-file) landing page.
+    pasteChoice.classList.add("hidden");
   }
 
   function setStatus(msg, isError) {
@@ -587,6 +693,21 @@
   function setBusy(msg) {
     statusEl.classList.remove("error");
     statusEl.innerHTML = '<span class="spinner" aria-hidden="true"></span>' + msg;
+  }
+
+  // Full-stage loading state: hide the panel/frame and show just a spinner.
+  function showLoading(msg) {
+    loadingMsg.textContent = msg || "Loading…";
+    setMenuOpen(false);
+    setStatus("");
+    panel.classList.add("hidden");
+    frame.classList.add("hidden");
+    warnStrip.classList.add("hidden");
+    loading.classList.remove("hidden");
+  }
+
+  function hideLoading() {
+    loading.classList.add("hidden");
   }
 
   // ---- Library load tracking ----
@@ -733,7 +854,7 @@
   // ---- Fetch + render ----
   async function loadFile(fileId) {
     currentFileId = fileId;
-    setBusy("Loading file…");
+    showLoading("Loading file…");
     try {
       // 1) metadata for the trust bar
       const metaResp = await fetch(
@@ -754,12 +875,16 @@
 
       renderTrustBar(meta);
       renderContent(html);
+      hideLoading();
       // Reflect the opened file in the address bar so it's copyable / bookmarkable
       // and survives a refresh. replaceState avoids adding a history entry, so the
       // browser Back button still leaves the app rather than juggling app states.
       history.replaceState(null, "", location.pathname + "?id=" + encodeURIComponent(fileId));
       setStatus("");
     } catch (err) {
+      // Restore the panel so the error (and the other choices) are visible again.
+      hideLoading();
+      panel.classList.remove("hidden");
       setStatus(err.message || "Something went wrong.", true);
     }
   }
@@ -803,6 +928,7 @@
     frame.src = "about:blank";
     frame.classList.add("hidden");
     warnStrip.classList.add("hidden");
+    hideLoading();
     panel.classList.remove("hidden");
   }
 

@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Drive HTML Viewer</title>
+
+<!--
+  CONFIG — replace these two values before deploying.
+  See setup notes at the bottom of this file.
+-->
+<script>
+  window.APP_CONFIG = {
+    // OAuth 2.0 Web client ID from Google Cloud Console
+    CLIENT_ID: "872159808085-up04dv1ko7lm8sliqcu9765ljtsvt3c0.apps.googleusercontent.com",
+    // API key (Picker requires this). Restrict it to your domain + Picker/Drive API.
+    API_KEY: "AIzaSyDWie3fULBvOg-RtWJ-wK2Ie0dFksSgNmA",
+    // GCP project number (the leading digits of CLIENT_ID, before the dash).
+    // Required so Picker grants drive.file access to selected files.
+    PROJECT_NUMBER: "872159808085",
+    // App display name shown in the trust bar
+    APP_NAME: "Drive HTML Previewer",
+  };
+</script>
+
+<style>
+  :root {
+    --ink: #14161a;
+    --paper: #fbfaf7;
+    --line: #e4e1d8;
+    --line-strong: #c8c4b6;
+    --accent: #2b5f4a;        /* deep pine — trust without the usual SaaS blue */
+    --accent-soft: #e8f0ec;
+    --warn-bg: #fff7e8;
+    --warn-line: #e8c873;
+    --warn-ink: #7a5a12;
+    --muted: #6b6a64;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+  }
+
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background: var(--paper);
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* ---------- Trust bar (outside the sandbox) ---------- */
+  .trustbar {
+    border-bottom: 1px solid var(--line);
+    background: #fff;
+    flex: 0 0 auto;
+  }
+
+  .trustbar-inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 10px 18px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    flex: 0 0 auto;
+  }
+
+  .brand .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .file-meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    line-height: 1.35;
+  }
+
+  .file-name {
+    font-weight: 600;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .file-owner {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .file-owner .label { color: var(--accent); font-weight: 600; }
+
+  .actions { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; }
+
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: 8px;
+    border: 1px solid var(--line-strong);
+    background: #fff;
+    color: var(--ink);
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  button:hover { background: #f3f1ec; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  button.primary:hover { background: #234c3b; }
+
+  button.ghost { border-color: transparent; background: transparent; }
+  button.ghost:hover { background: #f3f1ec; }
+
+  a.btn-link {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* ---------- Warning strip ---------- */
+  .warn {
+    background: var(--warn-bg);
+    border-bottom: 1px solid var(--warn-line);
+    color: var(--warn-ink);
+    font-size: 12.5px;
+    padding: 7px 18px;
+    text-align: center;
+    flex: 0 0 auto;
+  }
+
+  /* ---------- Stage ---------- */
+  .stage {
+    flex: 1 1 auto;
+    position: relative;
+    min-height: 0;
+    display: flex;
+  }
+
+  iframe#view {
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #fff;
+  }
+
+  /* ---------- Empty / sign-in panel ---------- */
+  .panel {
+    margin: auto;
+    max-width: 560px;
+    padding: 40px 32px;
+    text-align: center;
+  }
+
+  .panel h1 {
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    margin: 0 0 8px;
+  }
+
+  .panel p {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.55;
+    margin: 0 0 22px;
+  }
+
+  /* ---------- Choices (preview / view source / download) ---------- */
+  .choices {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    text-align: left;
+    margin: 0 0 18px;
+  }
+
+  .choice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: #fff;
+  }
+
+  .choice-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .choice-text strong { font-size: 14px; }
+  .choice-text span {
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  .choice button, .choice .btn-link button { white-space: nowrap; }
+
+  @media (max-width: 460px) {
+    .choice { flex-wrap: wrap; }
+  }
+
+  /* ---------- Reassurance line + "how it works" dialog ---------- */
+  .reassure {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 18px 0 0;
+  }
+
+  .link-btn {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-size: 12px;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .link-btn:hover { background: none; }
+
+  dialog#infoDialog {
+    max-width: 440px;
+    width: calc(100% - 48px);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  dialog#infoDialog::backdrop { background: rgba(20, 22, 26, .35); }
+  dialog#infoDialog h2 { margin: 0 0 10px; font-size: 16px; }
+  dialog#infoDialog p { margin: 0 0 10px; }
+  dialog#infoDialog code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    background: #f0eee8;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  dialog#infoDialog .dialog-actions { margin-top: 14px; text-align: right; }
+
+  .status {
+    font-size: 13px;
+    color: var(--muted);
+    min-height: 18px;
+    margin-top: 14px;
+  }
+  .status.error { color: #a23b2d; }
+
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--line-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    display: inline-block;
+    vertical-align: -3px;
+    margin-right: 6px;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .hidden { display: none !important; }
+
+  @media (max-width: 620px) {
+    .trustbar-inner { flex-wrap: wrap; gap: 8px 14px; }
+    .file-meta { order: 3; flex-basis: 100%; }
+    .actions { margin-left: auto; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Trust bar -->
+<header class="trustbar">
+  <div class="trustbar-inner">
+    <div class="brand">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="brandName">Drive HTML Viewer</span>
+    </div>
+
+    <div class="file-meta" id="fileMeta" style="visibility:hidden">
+      <span class="file-name" id="fileName">—</span>
+      <span class="file-owner" id="fileOwner">—</span>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" id="pickBtn" disabled>Open a file…</button>
+      <button class="ghost" id="copyLinkBtn" style="display:none">Copy share link</button>
+      <a class="btn-link" id="openDriveLink" href="#" target="_blank" rel="noopener noreferrer" style="display:none">
+        <button>Open in Google Drive ↗</button>
+      </a>
+      <button class="ghost" id="signOutBtn" style="display:none">Sign out</button>
+    </div>
+  </div>
+</header>
+
+<!-- Untrusted-content warning (only while a file is shown) -->
+<div class="warn hidden" id="warnStrip">
+  Rendering an HTML file stored on Google Drive in an isolated sandbox. Confirm the owner above before trusting its contents.
+</div>
+
+<!-- Stage -->
+<main class="stage">
+  <!-- Sign-in / empty state -->
+  <section class="panel" id="panel">
+    <h1 id="panelTitle">View HTML files from Drive</h1>
+    <p id="panelText">
+      Open an HTML file from your Google Drive and see it rendered as a web page,
+      safely and privately.
+    </p>
+
+    <div class="choices">
+      <div class="choice" id="previewChoice">
+        <div class="choice-text">
+          <strong id="previewLabel">Preview an HTML file in your Drive</strong>
+          <span id="previewDesc">Pick a file and see it rendered here.</span>
+        </div>
+        <button class="primary" id="signInBtn" disabled>
+          <span id="signInLabel">Loading Google…</span>
+        </button>
+      </div>
+
+      <div class="choice hidden" id="driveViewChoice">
+        <div class="choice-text">
+          <strong>View on Google Drive</strong>
+          <span>Opens in Drive's own viewer, in a new tab.</span>
+        </div>
+        <a class="btn-link" id="driveViewLink" href="#" target="_blank" rel="noopener noreferrer">
+          <button>Open ↗</button>
+        </a>
+      </div>
+
+      <div class="choice hidden" id="downloadChoice">
+        <div class="choice-text">
+          <strong>Download the file</strong>
+          <span>Saves it directly from Drive.</span>
+        </div>
+        <a class="btn-link" id="downloadLink" href="#" target="_blank" rel="noopener noreferrer">
+          <button>Download</button>
+        </a>
+      </div>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <p class="reassure">
+      Runs entirely in your browser — there's no server, and nothing you open is
+      stored or sent anywhere.
+      <button class="link-btn" id="infoBtn" type="button">How does this work?</button>
+    </p>
+  </section>
+
+  <dialog id="infoDialog">
+    <h2>Is this safe?</h2>
+    <p>
+      Yes. This web app talks directly to Google Drive from your browser — your
+      files never pass through any server of ours, because there isn't one.
+    </p>
+    <p>
+      When you sign in, this app can only open the one file you choose or the file
+      a link points to. It can't look at anything else in your Google Drive.
+    </p>
+    <p>
+      The file is shown in an isolated window-within-the-page, so whatever's in it
+      can't touch your Google account or read anything else on this page.
+    </p>
+    <p>
+      It's also open source, so you can
+      <a href="https://github.com/dtinth/drive-html-previewer/blob/main/public/index.html"
+         target="_blank" rel="noopener noreferrer">read exactly what it does</a>.
+    </p>
+    <div class="dialog-actions">
+      <button id="infoCloseBtn">Close</button>
+    </div>
+  </dialog>
+
+  <!-- Sandboxed render target. NOTE: no allow-same-origin → null origin. -->
+  <iframe
+    id="view"
+    class="hidden"
+    title="Rendered Drive HTML file"
+    sandbox="allow-scripts"
+    referrerpolicy="no-referrer">
+  </iframe>
+</main>
+
+<!-- Google Identity Services + API client -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://apis.google.com/js/api.js" async defer></script>
+
+<script>
+(function () {
+  "use strict";
+
+  const CFG = window.APP_CONFIG;
+  const SCOPE = "https://www.googleapis.com/auth/drive.file";
+
+  // ---- DOM ----
+  const el = (id) => document.getElementById(id);
+  const signInBtn   = el("signInBtn");
+  const signInLabel = el("signInLabel");
+  const signOutBtn  = el("signOutBtn");
+  const pickBtn     = el("pickBtn");
+  const copyLinkBtn = el("copyLinkBtn");
+  const statusEl    = el("status");
+  const panel       = el("panel");
+  const frame       = el("view");
+  const warnStrip   = el("warnStrip");
+  const fileMeta    = el("fileMeta");
+  const fileNameEl  = el("fileName");
+  const fileOwnerEl = el("fileOwner");
+  const driveLink   = el("openDriveLink");
+  const brandName   = el("brandName");
+  const previewLabel    = el("previewLabel");
+  const previewDesc     = el("previewDesc");
+  const driveViewChoice = el("driveViewChoice");
+  const driveViewLink   = el("driveViewLink");
+  const downloadChoice  = el("downloadChoice");
+  const downloadLink    = el("downloadLink");
+  const infoBtn      = el("infoBtn");
+  const infoDialog   = el("infoDialog");
+  const infoCloseBtn = el("infoCloseBtn");
+
+  infoBtn.addEventListener("click", () => infoDialog.showModal());
+  infoCloseBtn.addEventListener("click", () => infoDialog.close());
+
+  brandName.textContent = CFG.APP_NAME || "Drive HTML Viewer";
+  document.title = CFG.APP_NAME || "Drive HTML Viewer";
+
+  // ---- Parse a file reference from the share link ----
+  // Accepts:  ?id=FILE_ID
+  //           ?file=<any Drive URL containing /d/FILE_ID/ or ?id=FILE_ID>
+  //           #id=FILE_ID
+  function parseFileIdFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+    let raw = params.get("id") || hashParams.get("id") || params.get("file") || "";
+    if (!raw) return null;
+    raw = decodeURIComponent(raw);
+    // If a full Drive URL was passed, extract the id.
+    const dMatch = raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (dMatch) return dMatch[1];
+    const qMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (qMatch) return qMatch[1];
+    // Otherwise assume the value itself is an id.
+    if (/^[a-zA-Z0-9_-]+$/.test(raw)) return raw;
+    return null;
+  }
+
+  // ---- State ----
+  let tokenClient = null;
+  let accessToken = null;
+  let pickerLoaded = false;
+  let gapiLoaded = false;
+  let gisLoaded = false;
+  let currentBlobUrl = null;
+  let currentFileId = null;
+  let pendingFileId = null;   // file id parsed from the share link, loaded after auth
+  pendingFileId = parseFileIdFromUrl();
+
+  // If the link points at a specific file, offer it as three choices right
+  // away — preview here, view on Drive, or download — without waiting for
+  // the Google libraries to load.
+  if (pendingFileId) {
+    el("panelTitle").textContent = "Open shared file";
+    el("panelText").textContent =
+      "Someone shared an HTML file with you on Google Drive. Choose what to do:";
+    previewLabel.textContent = "Preview the HTML";
+    previewDesc.textContent = "Sign in, then confirm the file to render it here.";
+
+    driveViewLink.href = "https://drive.google.com/file/d/" + encodeURIComponent(pendingFileId) + "/view";
+    driveViewChoice.classList.remove("hidden");
+
+    downloadLink.href = "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(pendingFileId);
+    downloadChoice.classList.remove("hidden");
+  }
+
+  function setStatus(msg, isError) {
+    statusEl.textContent = msg || "";
+    statusEl.classList.toggle("error", !!isError);
+  }
+
+  function setBusy(msg) {
+    statusEl.classList.remove("error");
+    statusEl.innerHTML = '<span class="spinner" aria-hidden="true"></span>' + msg;
+  }
+
+  // ---- Library load tracking ----
+  function whenReady() {
+    if (gapiLoaded && gisLoaded) {
+      signInBtn.disabled = false;
+      // Enable the top-right "Open a file…" button as soon as Google is ready,
+      // even before sign-in — clicking it signs the user in, then opens the picker.
+      pickBtn.disabled = false;
+      signInLabel.textContent = "Sign in with Google";
+      setStatus("");
+    }
+  }
+
+  // Poll for the async-loaded scripts.
+  const readyTimer = setInterval(() => {
+    if (!gisLoaded && window.google && window.google.accounts && window.google.accounts.oauth2) {
+      gisLoaded = true;
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CFG.CLIENT_ID,
+        scope: SCOPE,
+        callback: onToken,
+      });
+    }
+    if (!gapiLoaded && window.gapi) {
+      gapi.load("client:picker", () => {
+        gapi.client.init({}).then(() => {
+          gapiLoaded = true;
+          pickerLoaded = true;
+          whenReady();
+        });
+      });
+    }
+    if (gisLoaded) whenReady();
+    if (gisLoaded && gapiLoaded) clearInterval(readyTimer);
+  }, 120);
+
+  // ---- Auth ----
+  signInBtn.addEventListener("click", () => {
+    if (!tokenClient) return;
+    setBusy("Opening Google sign-in…");
+    // No "consent" prompt: if the user already granted drive.file access,
+    // the popup opens, confirms the existing grant, and closes immediately
+    // instead of showing the full re-consent screen.
+    tokenClient.requestAccessToken({ prompt: "" });
+  });
+
+  function onToken(resp) {
+    if (resp.error) {
+      setStatus("Sign-in failed: " + resp.error, true);
+      return;
+    }
+    accessToken = resp.access_token;
+    setStatus("");
+    signInBtn.classList.add("hidden");
+    signOutBtn.style.display = "";
+    pickBtn.disabled = false;
+
+    if (pendingFileId) {
+      const id = pendingFileId;
+      pendingFileId = null;
+      openPicker(id);   // pre-navigated to the shared file
+    } else {
+      el("panelTitle").textContent = "Pick a file to view";
+      el("panelText").textContent =
+        "Choose an HTML file from your Drive. It opens below in an isolated sandbox.";
+      openPicker();
+    }
+  }
+
+  signOutBtn.addEventListener("click", () => {
+    if (accessToken) {
+      google.accounts.oauth2.revoke(accessToken, () => {});
+    }
+    accessToken = null;
+    currentFileId = null;
+    clearView();
+    signOutBtn.style.display = "none";
+    pickBtn.disabled = true;
+    driveLink.style.display = "none";
+    copyLinkBtn.style.display = "none";
+    fileMeta.style.visibility = "hidden";
+    signInBtn.classList.remove("hidden");
+    el("panelTitle").textContent = "View HTML files from Drive";
+    setStatus("Signed out.");
+  });
+
+  // ---- Picker ----
+  pickBtn.addEventListener("click", () => {
+    if (accessToken) {
+      openPicker();
+    } else if (tokenClient) {
+      // Not signed in yet — sign in first; onToken opens the picker afterwards.
+      setBusy("Opening Google sign-in…");
+      tokenClient.requestAccessToken({ prompt: "" });
+    }
+  });
+
+  // ---- Copy share link ----
+  copyLinkBtn.addEventListener("click", async () => {
+    if (!currentFileId) return;
+    const link = location.origin + location.pathname + "?id=" + currentFileId;
+    try {
+      await navigator.clipboard.writeText(link);
+      const orig = copyLinkBtn.textContent;
+      copyLinkBtn.textContent = "Copied ✓";
+      setTimeout(() => { copyLinkBtn.textContent = orig; }, 1600);
+    } catch (e) {
+      // Clipboard blocked — show the link so the user can copy manually.
+      window.prompt("Copy this share link:", link);
+    }
+  });
+
+  function openPicker(targetFileId) {
+    if (!pickerLoaded || !accessToken) return;
+    const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+      .setMimeTypes("text/html")
+      .setMode(google.picker.DocsViewMode.LIST);
+
+    // Pre-navigate the picker to a specific file (rolled out Jan 2025).
+    // The user grants drive.file access to just this file in one click.
+    if (targetFileId && typeof view.setFileIds === "function") {
+      view.setFileIds(targetFileId);
+    }
+
+    const picker = new google.picker.PickerBuilder()
+      .setOAuthToken(accessToken)
+      .setDeveloperKey(CFG.API_KEY)
+      .setAppId(CFG.PROJECT_NUMBER)
+      .setOrigin(window.location.protocol + "//" + window.location.host)
+      .addView(view)
+      .setTitle(targetFileId ? "Confirm access to this file" : "Choose an HTML file")
+      .setCallback(onPick)
+      .build();
+    picker.setVisible(true);
+  }
+
+  function onPick(data) {
+    if (data.action !== google.picker.Action.PICKED) return;
+    const doc = data.docs && data.docs[0];
+    if (doc) loadFile(doc.id);
+  }
+
+  // ---- Fetch + render ----
+  async function loadFile(fileId) {
+    currentFileId = fileId;
+    setBusy("Loading file…");
+    try {
+      // 1) metadata for the trust bar
+      const metaResp = await fetch(
+        "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(fileId) +
+        "?fields=name,mimeType,owners(displayName,emailAddress),webViewLink,modifiedTime",
+        { headers: { Authorization: "Bearer " + accessToken } }
+      );
+      if (!metaResp.ok) throw new Error("Couldn’t read file details (" + metaResp.status + ").");
+      const meta = await metaResp.json();
+
+      // 2) content
+      const contentResp = await fetch(
+        "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(fileId) + "?alt=media",
+        { headers: { Authorization: "Bearer " + accessToken } }
+      );
+      if (!contentResp.ok) throw new Error("Couldn’t download the file (" + contentResp.status + ").");
+      const html = await contentResp.text();
+
+      renderTrustBar(meta);
+      renderContent(html);
+      setStatus("");
+    } catch (err) {
+      setStatus(err.message || "Something went wrong.", true);
+    }
+  }
+
+  function renderTrustBar(meta) {
+    fileNameEl.textContent = meta.name || "Untitled";
+    const owner = (meta.owners && meta.owners[0]) || {};
+    const ownerName = owner.displayName || "Unknown";
+    const ownerEmail = owner.emailAddress ? " · " + owner.emailAddress : "";
+    fileOwnerEl.innerHTML =
+      '<span class="label">Owned by</span> ' +
+      escapeHtml(ownerName) + escapeHtml(ownerEmail);
+    fileMeta.style.visibility = "visible";
+
+    if (meta.webViewLink) {
+      driveLink.href = meta.webViewLink;
+      driveLink.style.display = "";
+    } else {
+      driveLink.style.display = "none";
+    }
+  }
+
+  function renderContent(html) {
+    // Revoke any previous blob URL to free memory.
+    if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+
+    // Blob URL gives the frame a stable null origin and lets relative
+    // inline assets / styles resolve naturally. Sandbox stays locked down.
+    const blob = new Blob([html], { type: "text/html" });
+    currentBlobUrl = URL.createObjectURL(blob);
+    frame.src = currentBlobUrl;
+
+    panel.classList.add("hidden");
+    frame.classList.remove("hidden");
+    warnStrip.classList.remove("hidden");
+    copyLinkBtn.style.display = "";
+  }
+
+  function clearView() {
+    if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+    frame.src = "about:blank";
+    frame.classList.add("hidden");
+    warnStrip.classList.add("hidden");
+    panel.classList.remove("hidden");
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+})();
+</script>
+
+<!--
+========================================================================
+ SETUP  (one-time, ~10 minutes)
+========================================================================
+
+1. Google Cloud Console → create or pick a project.
+
+2. APIs & Services → Library → enable:
+     • Google Drive API
+     • Google Picker API
+
+3. APIs & Services → Credentials:
+     a) Create an "OAuth client ID" → Application type: Web application.
+        Add your deploy origin to "Authorized JavaScript origins", e.g.
+          https://yourname.github.io     (GitHub Pages)
+          https://your-app.pages.dev      (Cloudflare Pages)
+          http://localhost:8000           (for local testing)
+        Copy the client ID into APP_CONFIG.CLIENT_ID above.
+     b) Create an "API key". Restrict it:
+          • Application restriction → HTTP referrers → your origin(s)
+          • API restriction → Google Picker API (+ Drive API)
+        Copy it into APP_CONFIG.API_KEY above.
+
+4. OAuth consent screen:
+     • User type "External".
+     • Add the scope  .../auth/drive.file  — this is NON-SENSITIVE. It does
+       NOT require Google verification or a CASA security audit. You can
+       "Publish app" and any Google account can use it immediately.
+     • (In Testing mode it also works right away for listed test users.)
+
+5. Deploy index.html to any static host (GitHub Pages, Cloudflare Pages,
+   Netlify, Vercel, S3…). No server code needed.
+
+Sharing a file:
+  • Open a file (via picker), click "Copy share link" → produces
+      https://your-host/index.html?id=FILE_ID
+  • The recipient opens the link, signs in, and sees a picker PRE-NAVIGATED
+    to that file (Picker setFileIds, rolled out Jan 2025). One click grants
+    drive.file access to just that file, and it renders. The recipient must
+    still have Drive permission to the file — the link alone grants nothing.
+  • You can also hand-build links: ?id=FILE_ID, or ?file=<full Drive URL>.
+
+Security recap:
+  • Scope is drive.file → the app only ever accesses files the user picks
+    or confirms via the pre-navigated picker. No broad Drive access. No
+    verification, no audit.
+  • The iframe uses sandbox="allow-scripts" with NO allow-same-origin,
+    so rendered HTML runs in a null origin and cannot read this app's
+    tokens, cookies, or storage.
+  • Access tokens live in memory only; nothing is persisted.
+========================================================================
+-->
+</body>
+</html>

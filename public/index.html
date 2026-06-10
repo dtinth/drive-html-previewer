@@ -114,7 +114,16 @@
 
   .file-owner .label { color: var(--accent); font-weight: 600; }
 
-  .actions { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; }
+  .actions-wrap { flex: 0 0 auto; position: relative; }
+  .actions { display: flex; gap: 8px; align-items: center; }
+
+  /* Hamburger/overflow toggle — only shown on narrow screens. */
+  .menu-toggle {
+    display: none;
+    line-height: 1;
+    padding: 6px 12px;
+    font-size: 18px;
+  }
 
   button {
     font: inherit;
@@ -300,7 +309,38 @@
   @media (max-width: 620px) {
     .trustbar-inner { flex-wrap: wrap; gap: 8px 14px; }
     .file-meta { order: 3; flex-basis: 100%; }
-    .actions { margin-left: auto; }
+    .actions-wrap { margin-left: auto; }
+
+    .menu-toggle { display: inline-flex; }
+
+    /* Collapse the action buttons into a dropdown anchored to the toggle. */
+    .actions {
+      display: none;
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      flex-direction: column;
+      align-items: stretch;
+      gap: 4px;
+      background: #fff;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 24px rgba(20, 22, 26, .14);
+      padding: 6px;
+      min-width: 190px;
+      z-index: 50;
+    }
+    .actions.open { display: flex; }
+
+    /* Make each item a full-width, left-aligned menu row. */
+    .actions > button,
+    .actions .btn-link,
+    .actions .btn-link > button {
+      width: 100%;
+      text-align: left;
+      justify-content: flex-start;
+      border-color: transparent;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -324,13 +364,16 @@
       <span class="file-owner" id="fileOwner">—</span>
     </div>
 
-    <div class="actions">
-      <button class="ghost" id="pickBtn" disabled>Open a file…</button>
-      <button class="ghost" id="copyLinkBtn" style="display:none">Copy share link</button>
-      <a class="btn-link" id="openDriveLink" href="#" target="_blank" rel="noopener noreferrer" style="display:none">
-        <button>Open in Google Drive ↗</button>
-      </a>
-      <button class="ghost" id="signOutBtn" style="display:none">Sign out</button>
+    <div class="actions-wrap">
+      <button class="ghost menu-toggle" id="menuToggle" aria-label="Menu" aria-haspopup="true" aria-expanded="false">⋯</button>
+      <div class="actions" id="actions">
+        <button class="ghost" id="pickBtn" disabled>Open a file…</button>
+        <button class="ghost" id="copyLinkBtn" style="display:none">Copy share link</button>
+        <a class="btn-link" id="openDriveLink" href="#" target="_blank" rel="noopener noreferrer" style="display:none">
+          <button>Open in Google Drive ↗</button>
+        </a>
+        <button class="ghost" id="signOutBtn" style="display:none">Sign out</button>
+      </div>
     </div>
   </div>
 </header>
@@ -461,9 +504,29 @@
   const infoBtn      = el("infoBtn");
   const infoDialog   = el("infoDialog");
   const infoCloseBtn = el("infoCloseBtn");
+  const menuToggle   = el("menuToggle");
+  const actions      = el("actions");
 
   infoBtn.addEventListener("click", () => infoDialog.showModal());
   infoCloseBtn.addEventListener("click", () => infoDialog.close());
+
+  // ---- Mobile action menu ----
+  function setMenuOpen(open) {
+    actions.classList.toggle("open", open);
+    menuToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  menuToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setMenuOpen(!actions.classList.contains("open"));
+  });
+  // Close when tapping an action or anywhere outside the menu.
+  actions.addEventListener("click", () => setMenuOpen(false));
+  document.addEventListener("click", (e) => {
+    if (!actions.contains(e.target) && e.target !== menuToggle) setMenuOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setMenuOpen(false);
+  });
 
   brandName.textContent = CFG.APP_NAME || "Drive HTML Viewer";
   document.title = CFG.APP_NAME || "Drive HTML Viewer";
@@ -691,6 +754,10 @@
 
       renderTrustBar(meta);
       renderContent(html);
+      // Reflect the opened file in the address bar so it's copyable / bookmarkable
+      // and survives a refresh. replaceState avoids adding a history entry, so the
+      // browser Back button still leaves the app rather than juggling app states.
+      history.replaceState(null, "", location.pathname + "?id=" + encodeURIComponent(fileId));
       setStatus("");
     } catch (err) {
       setStatus(err.message || "Something went wrong.", true);

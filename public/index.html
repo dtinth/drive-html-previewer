@@ -635,7 +635,13 @@
   //   FILE_ID
   function extractFileId(raw) {
     if (!raw) return null;
-    raw = decodeURIComponent(String(raw).trim());
+    raw = String(raw).trim();
+    // URLSearchParams already decodes query values, and Drive ids are always
+    // URL-safe ([A-Za-z0-9_-]), so decoding is only a convenience for
+    // hand-pasted, still-encoded links. A stray "%" (e.g. a tracking param
+    // like usp=100%) makes decodeURIComponent throw — swallow it and fall
+    // back to the raw string rather than crashing the caller.
+    try { raw = decodeURIComponent(raw); } catch (_) { /* keep raw as-is */ }
     const dMatch = raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
     if (dMatch) return dMatch[1];
     const qMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]+)/);
@@ -722,7 +728,12 @@
     }
   }
 
-  // Poll for the async-loaded scripts.
+  // Poll for the async-loaded scripts. Give up after ~15s so a blocked or
+  // failed Google script (ad-blocker, offline, CSP) doesn't poll forever and
+  // instead surfaces an actionable message.
+  const READY_POLL_MS = 120;
+  const READY_MAX_TRIES = Math.ceil(15000 / READY_POLL_MS);
+  let readyTries = 0;
   const readyTimer = setInterval(() => {
     if (!gisLoaded && window.google && window.google.accounts && window.google.accounts.oauth2) {
       gisLoaded = true;
@@ -742,8 +753,13 @@
       });
     }
     if (gisLoaded) whenReady();
-    if (gisLoaded && gapiLoaded) clearInterval(readyTimer);
-  }, 120);
+    if (gisLoaded && gapiLoaded) {
+      clearInterval(readyTimer);
+    } else if (++readyTries >= READY_MAX_TRIES) {
+      clearInterval(readyTimer);
+      setStatus("Couldn’t reach Google. Check your connection or any content blockers, then reload.", true);
+    }
+  }, READY_POLL_MS);
 
   // ---- Auth ----
   signInBtn.addEventListener("click", () => {
@@ -809,7 +825,7 @@
   // ---- Copy share link ----
   copyLinkBtn.addEventListener("click", async () => {
     if (!currentFileId) return;
-    const link = location.origin + location.pathname + "?id=" + currentFileId;
+    const link = location.origin + location.pathname + "?id=" + encodeURIComponent(currentFileId);
     try {
       await navigator.clipboard.writeText(link);
       const orig = copyLinkBtn.textContent;

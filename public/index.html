@@ -552,6 +552,10 @@
 
   const CFG = window.APP_CONFIG;
   const SCOPE = "https://www.googleapis.com/auth/drive.file";
+  const DRIVE_FILES = "https://www.googleapis.com/drive/v3/files/";
+  // Remembers only that this browser has signed in before (a boolean) so a
+  // return visit can restore the session silently. Never holds a token.
+  const RETURNING_KEY = "dhp:returning";
 
   // ---- DOM ----
   const el = (id) => document.getElementById(id);
@@ -669,6 +673,8 @@
   let currentBlobUrl = null;
   let currentFileId = null;
   let pendingFileId = null;   // file id parsed from the share link, loaded after auth
+  let silentAuth = false;     // true while a no-UI (prompt:"none") token request is in flight
+  let silentTried = false;    // ensures the on-load silent sign-in runs at most once
   pendingFileId = parseFileIdFromUrl();
 
   // If the link points at a specific file, offer it as three choices right
@@ -689,6 +695,12 @@
 
     // The paste-a-link card only belongs on the empty (no-file) landing page.
     pasteChoice.classList.add("hidden");
+
+    // Try the no-sign-in public path first. If the file is shared as "anyone
+    // with the link", it renders immediately with just the API key — no sign-in
+    // and no picker. If it's private, this fails quietly and the choices above
+    // remain for the user to sign in and confirm access.
+    tryPublicPreview(pendingFileId);
   }
 
   function setStatus(msg, isError) {
@@ -719,11 +731,15 @@
   // ---- Library load tracking ----
   function whenReady() {
     if (gapiLoaded && gisLoaded) {
-      signInBtn.disabled = false;
       // Enable the top-right "Open a file…" button as soon as Google is ready,
       // even before sign-in — clicking it signs the user in, then opens the picker.
       pickBtn.disabled = false;
-      signInLabel.textContent = "Sign in with Google";
+      // Don't relabel the primary button if a silent sign-in already promoted
+      // it to "Choose a file to view" / "Preview the HTML".
+      if (!accessToken) {
+        signInBtn.disabled = false;
+        signInLabel.textContent = "Sign in with Google";
+      }
       setStatus("");
     }
   }
@@ -753,6 +769,8 @@
       });
     }
     if (gisLoaded) whenReady();
+    // Returning users: restore the session with no popup as soon as GIS is up.
+    maybeSilentSignIn();
     if (gisLoaded && gapiLoaded) {
       clearInterval(readyTimer);
     } else if (++readyTries >= READY_MAX_TRIES) {
@@ -763,6 +781,11 @@
 
   // ---- Auth ----
   signInBtn.addEventListener("click", () => {
+    if (accessToken) {
+      // Already signed in (e.g. a silent restore) — skip auth, open the picker.
+      openPicker(pendingFileId || undefined);
+      return;
+    }
     if (!tokenClient) return;
     setBusy("Opening Google sign-in…");
     // No "consent" prompt: if the user already granted drive.file access,
@@ -771,16 +794,61 @@
     tokenClient.requestAccessToken({ prompt: "" });
   });
 
+  // Remember (only) that this browser has signed in, so a return visit can
+  // restore the session silently. No token or file content is ever stored.
+  function rememberReturning() {
+    try { localStorage.setItem(RETURNING_KEY, "1"); } catch (_) {}
+  }
+  function isReturning() {
+    try { return localStorage.getItem(RETURNING_KEY) === "1"; } catch (_) { return false; }
+  }
+  function forgetReturning() {
+    try { localStorage.removeItem(RETURNING_KEY); } catch (_) {}
+  }
+
+  // For a returning user, request a token with no UI at all. It succeeds only
+  // if they're still signed into Google and previously granted the scope;
+  // otherwise onToken gets an error we ignore silently.
+  function maybeSilentSignIn() {
+    if (silentTried || accessToken || !tokenClient || !isReturning()) return;
+    silentTried = true;
+    silentAuth = true;
+    try {
+      tokenClient.requestAccessToken({ prompt: "none" });
+    } catch (_) {
+      silentAuth = false;
+    }
+  }
+
+  // Reflect signed-in state in the chrome without opening a picker.
+  function applySignedIn() {
+    setStatus("");
+    signOutBtn.style.display = "";
+    pickBtn.disabled = false;
+    signInBtn.classList.remove("hidden");
+    signInBtn.disabled = false;
+    if (pendingFileId) {
+      signInLabel.textContent = "Preview the HTML";
+      previewDesc.textContent = "Confirm the file to render it here.";
+    } else {
+      signInLabel.textContent = "Choose a file to view";
+    }
+  }
+
   function onToken(resp) {
+    const wasSilent = silentAuth;
+    silentAuth = false;
     if (resp.error) {
-      setStatus("Sign-in failed: " + resp.error, true);
+      // A failed silent attempt is expected (logged out / grant revoked) — stay quiet.
+      if (!wasSilent) setStatus("Sign-in failed: " + resp.error, true);
       return;
     }
     accessToken = resp.access_token;
-    setStatus("");
-    signInBtn.classList.add("hidden");
-    signOutBtn.style.display = "";
-    pickBtn.disabled = false;
+    rememberReturning();
+    applySignedIn();
+
+    // Silent restore: leave the user where they are, don't pop a picker.
+    if (wasSilent) return;
 
     if (pendingFileId) {
       const id = pendingFileId;
@@ -800,6 +868,9 @@
     }
     accessToken = null;
     currentFileId = null;
+    // Don't silently sign back in — this visit or the next.
+    forgetReturning();
+    silentTried = true;
     clearView();
     signOutBtn.style.display = "none";
     pickBtn.disabled = true;
@@ -807,6 +878,8 @@
     copyLinkBtn.style.display = "none";
     fileMeta.style.visibility = "hidden";
     signInBtn.classList.remove("hidden");
+    signInBtn.disabled = false;
+    signInLabel.textContent = "Sign in with Google";
     el("panelTitle").textContent = "View HTML files from Drive";
     setStatus("Signed out.");
   });
@@ -838,7 +911,8 @@
   });
 
   function openPicker(targetFileId) {
-    if (!pickerLoaded || !accessToken) return;
+    if (!accessToken) return;
+    if (!pickerLoaded) { setStatus("Still loading Google… try again in a moment."); return; }
     const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
       .setMimeTypes("text/html")
       .setMode(google.picker.DocsViewMode.LIST);
@@ -868,27 +942,45 @@
   }
 
   // ---- Fetch + render ----
-  async function loadFile(fileId) {
+  // Fetch a Drive file resource. Uses the signed-in token when we have one,
+  // otherwise falls back to the API key — which works for files shared as
+  // "anyone with the link", letting public files preview without sign-in.
+  // `query` always begins with "?", so appending "&key=" is safe.
+  function driveFileFetch(fileId, query) {
+    const url = DRIVE_FILES + encodeURIComponent(fileId) + query;
+    if (accessToken) {
+      return fetch(url, { headers: { Authorization: "Bearer " + accessToken } });
+    }
+    return fetch(url + "&key=" + encodeURIComponent(CFG.API_KEY));
+  }
+
+  // Try to render a shared file with the API key alone (no sign-in). On any
+  // failure (private / restricted / blocked) it stays quiet and leaves the
+  // sign-in choices in place. Runs "quiet" so a private file never flashes a
+  // spinner — the choices simply remain visible.
+  async function tryPublicPreview(fileId) {
+    await loadFile(fileId, { silentFail: true, quiet: true });
+  }
+
+  async function loadFile(fileId, opts) {
+    opts = opts || {};
     currentFileId = fileId;
-    showLoading("Loading file…");
+    if (!opts.quiet) showLoading("Loading file…");
     try {
       // 1) metadata for the trust bar
-      const metaResp = await fetch(
-        "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(fileId) +
-        "?fields=name,mimeType,owners(displayName,emailAddress),webViewLink,modifiedTime",
-        { headers: { Authorization: "Bearer " + accessToken } }
+      const metaResp = await driveFileFetch(
+        fileId,
+        "?fields=name,mimeType,owners(displayName,emailAddress),webViewLink,modifiedTime"
       );
       if (!metaResp.ok) throw new Error("Couldn’t read file details (" + metaResp.status + ").");
       const meta = await metaResp.json();
 
       // 2) content
-      const contentResp = await fetch(
-        "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(fileId) + "?alt=media",
-        { headers: { Authorization: "Bearer " + accessToken } }
-      );
+      const contentResp = await driveFileFetch(fileId, "?alt=media");
       if (!contentResp.ok) throw new Error("Couldn’t download the file (" + contentResp.status + ").");
       const html = await contentResp.text();
 
+      pendingFileId = null;   // the file is now open; nothing left pending
       renderTrustBar(meta);
       renderContent(html);
       hideLoading();
@@ -897,11 +989,16 @@
       // browser Back button still leaves the app rather than juggling app states.
       history.replaceState(null, "", location.pathname + "?id=" + encodeURIComponent(fileId));
       setStatus("");
+      return true;
     } catch (err) {
-      // Restore the panel so the error (and the other choices) are visible again.
       hideLoading();
+      // Quiet/silent callers (e.g. the public-preview probe) show their own
+      // fallback UI instead of an error.
+      if (opts.silentFail) return false;
+      // Restore the panel so the error (and the other choices) are visible again.
       panel.classList.remove("hidden");
       setStatus(err.message || "Something went wrong.", true);
+      return false;
     }
   }
 
@@ -992,20 +1089,32 @@
 Sharing a file:
   • Open a file (via picker), click "Copy share link" → produces
       https://your-host/index.html?id=FILE_ID
-  • The recipient opens the link, signs in, and sees a picker PRE-NAVIGATED
-    to that file (Picker setFileIds, rolled out Jan 2025). One click grants
-    drive.file access to just that file, and it renders. The recipient must
-    still have Drive permission to the file — the link alone grants nothing.
+  • If the file is shared "anyone with the link", the recipient's page fetches
+    it with just the API key and renders it immediately — no sign-in, no picker.
+  • Otherwise the recipient signs in and sees a picker PRE-NAVIGATED to that
+    file (Picker setFileIds, rolled out Jan 2025). One click grants drive.file
+    access to just that file, and it renders. The recipient must still have
+    Drive permission to the file — the link alone grants nothing.
   • You can also hand-build links: ?id=FILE_ID, or ?file=<full Drive URL>.
 
+Returning users:
+  • A boolean flag in localStorage ("dhp:returning") records that this browser
+    has signed in before, so the next visit attempts a no-UI token request
+    (prompt:"none") to restore the session with no popup. No token or file
+    content is ever stored; signing out clears the flag.
+
 Security recap:
-  • Scope is drive.file → the app only ever accesses files the user picks
-    or confirms via the pre-navigated picker. No broad Drive access. No
+  • Scope is drive.file → the app only accesses your OWN files that you pick
+    or confirm via the pre-navigated picker. No broad Drive access. No
     verification, no audit.
+  • The keyless public path only reaches files already shared "anyone with the
+    link" — data anyone with the API key (which is public) could fetch anyway.
+    It never touches private files.
   • The iframe uses sandbox="allow-scripts" with NO allow-same-origin,
     so rendered HTML runs in a null origin and cannot read this app's
     tokens, cookies, or storage.
-  • Access tokens live in memory only; nothing is persisted.
+  • Access tokens live in memory only; only the returning-user flag above is
+    persisted.
 ========================================================================
 -->
 </body>

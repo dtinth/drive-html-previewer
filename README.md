@@ -36,10 +36,16 @@ privately, with access still governed by Drive's own permissions.
 - Sign in with Google using the narrow **`drive.file`** scope — the app can only
   ever see files you explicitly pick or open via a shared link, never the rest of
   your Drive.
+- **Public files** (shared as _"anyone with the link"_) render straight away with
+  just the API key — no sign-in and no picker. Private files fall back to sign-in
+  plus a one-click picker confirmation for that single file.
 - The selected file is fetched in the browser and rendered inside a sandboxed
   `<iframe>` (scripts allowed, but no access to this page's data, cookies, or
   sign-in token).
-- Access tokens live in memory only; nothing is persisted.
+- Access tokens live in memory only; the app never stores a token or any file
+  content. It keeps just one boolean flag in `localStorage` remembering that
+  you've signed in before, so a return visit can **restore your session
+  silently** (no popup). Signing out clears it.
 
 ### Sharing a file
 
@@ -70,6 +76,34 @@ that file.
 
 The committed keys are client-side credentials restricted by HTTP referrer /
 authorized JavaScript origin, so they're safe to publish.
+
+## Quotas & rate limits
+
+Google Drive API usage is metered against the **Cloud project**, not the API key
+— the key just identifies which project a request bills to. All traffic
+(everyone's, across both the signed-in and public paths) draws from one shared
+pool. Default limits:
+
+| Scope                          | Limit                     |
+| ------------------------------ | ------------------------- |
+| Per project, per minute        | 1,000,000 quota units     |
+| Per user, per project, per min | 325,000 quota units       |
+| Per project, per day           | 400,000,000 quota units   |
+
+"Quota units" are weighted per operation, not per request: a metadata read
+(`files.get`) costs ~5 units and a content download (`?alt=media`) ~200, so one
+rendered file is ~**205 units** — roughly **4,800 renders/min** project-wide and
+**~1,500/min per user** before throttling. For the per-user bucket, a signed-in
+user is keyed by their Google account; on the keyless **public** path it falls
+back to the caller's IP address.
+
+Exceeding a limit returns **`403 userRateLimitExceeded`** (or a `429` from
+backend throttling); retry with exponential backoff. The public path is the
+main exposure, since anonymous shared-link traffic is unauthenticated and
+project-scoped. Live usage and quota-increase requests live in
+**Google Cloud Console → APIs & Services → Google Drive API → Quotas**.
+
+See [Google Drive API — Usage limits](https://developers.google.com/workspace/drive/api/guides/limits).
 
 ## Deploy
 

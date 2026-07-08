@@ -532,12 +532,14 @@
     <p id="loadingMsg">Loading file…</p>
   </div>
 
-  <!-- Sandboxed render target. NOTE: no allow-same-origin → null origin. -->
+  <!-- Sandboxed render target. allow-forms lets rendered pages submit forms;
+       deliberately NO allow-same-origin, so the frame stays a null origin and
+       cannot read this app's token, cookies, or storage. -->
   <iframe
     id="view"
     class="hidden"
     title="Rendered Drive HTML file"
-    sandbox="allow-scripts"
+    sandbox="allow-scripts allow-forms"
     referrerpolicy="no-referrer">
   </iframe>
 </main>
@@ -556,6 +558,9 @@
   // Remembers only that this browser has signed in before (a boolean) so a
   // return visit can restore the session silently. Never holds a token.
   const RETURNING_KEY = "dhp:returning";
+  // Caches the short-lived access token in sessionStorage (this tab only,
+  // cleared when the tab closes) so a reload reuses it instead of re-authing.
+  const TOKEN_KEY = "dhp:token";
 
   // ---- DOM ----
   const el = (id) => document.getElementById(id);
@@ -673,9 +678,15 @@
   let currentBlobUrl = null;
   let currentFileId = null;
   let pendingFileId = null;   // file id parsed from the share link, loaded after auth
-  let silentAuth = false;     // true while a no-UI (prompt:"none") token request is in flight
+  let silentInFlight = false; // true while a no-UI (prompt:"none") token request is pending
   let silentTried = false;    // ensures the on-load silent sign-in runs at most once
+  let wantPicker = false;     // an explicit user action is waiting to open the picker post-auth
   pendingFileId = parseFileIdFromUrl();
+
+  // Reuse a still-valid token cached earlier this tab session so a reload
+  // doesn't require re-authing (the chrome is restored just below, after the
+  // shared-file block sets its default copy, so signed-in wording wins).
+  accessToken = loadStoredToken();
 
   // If the link points at a specific file, offer it as three choices right
   // away — preview here, view on Drive, or download — without waiting for
@@ -696,12 +707,15 @@
     // The paste-a-link card only belongs on the empty (no-file) landing page.
     pasteChoice.classList.add("hidden");
 
-    // Try the no-sign-in public path first. If the file is shared as "anyone
-    // with the link", it renders immediately with just the API key — no sign-in
-    // and no picker. If it's private, this fails quietly and the choices above
-    // remain for the user to sign in and confirm access.
-    tryPublicPreview(pendingFileId);
+    // Try to render without user interaction: reuse a cached token grant if we
+    // have one, else the keyless public path (files shared "anyone with the
+    // link"). If neither works, the choices above remain for sign-in + confirm.
+    previewSharedOnLoad(pendingFileId);
   }
+
+  // Reflect a restored session in the chrome (signed-in wording now wins over
+  // the shared-file block's signed-out default).
+  if (accessToken) applySignedIn();
 
   function setStatus(msg, isError) {
     statusEl.textContent = msg || "";
@@ -780,18 +794,30 @@
   }, READY_POLL_MS);
 
   // ---- Auth ----
+  // Explicit, user-initiated sign-in that should flow straight into the picker.
+  // Records the intent (wantPicker) so the token callback opens the picker even
+  // if an on-load silent request is still in flight — otherwise the silent
+  // request's callback would be misread as "just restore" and swallow the click.
+  function requestSignIn() {
+    if (!tokenClient) return;
+    wantPicker = true;
+    setBusy("Opening Google sign-in…");
+    // A silent (prompt:"none") request is already pending — let its callback
+    // resolve and honor wantPicker instead of firing a second, competing one.
+    if (silentInFlight) return;
+    // No "consent" prompt: if the user already granted drive.file access, the
+    // popup confirms the existing grant and closes immediately instead of
+    // showing the full re-consent screen.
+    tokenClient.requestAccessToken({ prompt: "" });
+  }
+
   signInBtn.addEventListener("click", () => {
     if (accessToken) {
       // Already signed in (e.g. a silent restore) — skip auth, open the picker.
       openPicker(pendingFileId || undefined);
       return;
     }
-    if (!tokenClient) return;
-    setBusy("Opening Google sign-in…");
-    // No "consent" prompt: if the user already granted drive.file access,
-    // the popup opens, confirms the existing grant, and closes immediately
-    // instead of showing the full re-consent screen.
-    tokenClient.requestAccessToken({ prompt: "" });
+    requestSignIn();
   });
 
   // Remember (only) that this browser has signed in, so a return visit can
@@ -806,17 +832,37 @@
     try { localStorage.removeItem(RETURNING_KEY); } catch (_) {}
   }
 
+  // ---- Access-token cache (sessionStorage, this tab only) ----
+  function storeToken(token, expiresInSec) {
+    try {
+      const e = Date.now() + (Number(expiresInSec) || 0) * 1000;
+      sessionStorage.setItem(TOKEN_KEY, JSON.stringify({ t: token, e: e }));
+    } catch (_) {}
+  }
+  function loadStoredToken() {
+    try {
+      const o = JSON.parse(sessionStorage.getItem(TOKEN_KEY) || "null");
+      // Require >60s of remaining validity so a reused token can't expire
+      // mid-request.
+      if (o && o.t && o.e && o.e - Date.now() > 60000) return o.t;
+    } catch (_) {}
+    return null;
+  }
+  function clearStoredToken() {
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
+  }
+
   // For a returning user, request a token with no UI at all. It succeeds only
   // if they're still signed into Google and previously granted the scope;
   // otherwise onToken gets an error we ignore silently.
   function maybeSilentSignIn() {
     if (silentTried || accessToken || !tokenClient || !isReturning()) return;
     silentTried = true;
-    silentAuth = true;
+    silentInFlight = true;
     try {
       tokenClient.requestAccessToken({ prompt: "none" });
     } catch (_) {
-      silentAuth = false;
+      silentInFlight = false;
     }
   }
 
@@ -836,19 +882,30 @@
   }
 
   function onToken(resp) {
-    const wasSilent = silentAuth;
-    silentAuth = false;
+    const wasSilent = silentInFlight;
+    silentInFlight = false;
     if (resp.error) {
-      // A failed silent attempt is expected (logged out / grant revoked) — stay quiet.
-      if (!wasSilent) setStatus("Sign-in failed: " + resp.error, true);
+      if (wasSilent && wantPicker) {
+        // The user clicked while the silent request was in flight, and the
+        // silent one failed (not eligible) — now run the interactive flow.
+        setBusy("Opening Google sign-in…");
+        tokenClient.requestAccessToken({ prompt: "" });
+      } else if (!wasSilent) {
+        // An interactive attempt failed (popup closed, denied, …).
+        setStatus("Sign-in failed: " + resp.error, true);
+      }
+      // A purely silent failure (logged out / grant revoked) is expected — stay quiet.
       return;
     }
     accessToken = resp.access_token;
+    storeToken(resp.access_token, resp.expires_in);
     rememberReturning();
     applySignedIn();
 
-    // Silent restore: leave the user where they are, don't pop a picker.
-    if (wasSilent) return;
+    // No pending user intent: this was a silent restore — leave them where they
+    // are rather than popping a picker unprompted.
+    if (!wantPicker) return;
+    wantPicker = false;
 
     if (pendingFileId) {
       const id = pendingFileId;
@@ -863,12 +920,13 @@
   }
 
   signOutBtn.addEventListener("click", () => {
-    if (accessToken) {
+    if (accessToken && window.google && google.accounts && google.accounts.oauth2) {
       google.accounts.oauth2.revoke(accessToken, () => {});
     }
     accessToken = null;
     currentFileId = null;
-    // Don't silently sign back in — this visit or the next.
+    // Drop the cached token and don't silently sign back in — this visit or the next.
+    clearStoredToken();
     forgetReturning();
     silentTried = true;
     clearView();
@@ -888,10 +946,9 @@
   pickBtn.addEventListener("click", () => {
     if (accessToken) {
       openPicker();
-    } else if (tokenClient) {
+    } else {
       // Not signed in yet — sign in first; onToken opens the picker afterwards.
-      setBusy("Opening Google sign-in…");
-      tokenClient.requestAccessToken({ prompt: "" });
+      requestSignIn();
     }
   });
 
@@ -942,24 +999,43 @@
   }
 
   // ---- Fetch + render ----
+  function httpError(status, msg) {
+    const e = new Error(msg + " (" + status + ").");
+    e.status = status;
+    return e;
+  }
+
   // Fetch a Drive file resource. Uses the signed-in token when we have one,
-  // otherwise falls back to the API key — which works for files shared as
-  // "anyone with the link", letting public files preview without sign-in.
+  // otherwise (or when publicOnly is set) falls back to the API key — which
+  // works for files shared as "anyone with the link".
   // `query` always begins with "?", so appending "&key=" is safe.
-  function driveFileFetch(fileId, query) {
+  function driveFileFetch(fileId, query, publicOnly) {
     const url = DRIVE_FILES + encodeURIComponent(fileId) + query;
-    if (accessToken) {
+    if (accessToken && !publicOnly) {
       return fetch(url, { headers: { Authorization: "Bearer " + accessToken } });
     }
     return fetch(url + "&key=" + encodeURIComponent(CFG.API_KEY));
   }
 
-  // Try to render a shared file with the API key alone (no sign-in). On any
-  // failure (private / restricted / blocked) it stays quiet and leaves the
-  // sign-in choices in place. Runs "quiet" so a private file never flashes a
-  // spinner — the choices simply remain visible.
+  // Try to render a shared file with the API key alone (no sign-in). Forces the
+  // keyless path even if a token is cached — a token only reaches files the app
+  // was granted via the picker, whereas the key reaches any public file. On any
+  // failure it stays quiet and leaves the sign-in choices in place. Runs "quiet"
+  // so a private file never flashes a spinner — the choices simply remain.
   async function tryPublicPreview(fileId) {
-    await loadFile(fileId, { silentFail: true, quiet: true });
+    await loadFile(fileId, { silentFail: true, quiet: true, publicOnly: true });
+  }
+
+  // On load with a ?id= link: if a token was restored this session, reuse it to
+  // reload a file the app was already granted (instant refresh). Otherwise fall
+  // back to the keyless public path; either way, on failure the sign-in choices
+  // remain for the user to pick up from.
+  async function previewSharedOnLoad(fileId) {
+    if (accessToken) {
+      const ok = await loadFile(fileId, { silentFail: true, quiet: true });
+      if (ok) return;
+    }
+    await tryPublicPreview(fileId);
   }
 
   async function loadFile(fileId, opts) {
@@ -970,14 +1046,15 @@
       // 1) metadata for the trust bar
       const metaResp = await driveFileFetch(
         fileId,
-        "?fields=name,mimeType,owners(displayName,emailAddress),webViewLink,modifiedTime"
+        "?fields=name,mimeType,owners(displayName,emailAddress),webViewLink,modifiedTime",
+        opts.publicOnly
       );
-      if (!metaResp.ok) throw new Error("Couldn’t read file details (" + metaResp.status + ").");
+      if (!metaResp.ok) throw httpError(metaResp.status, "Couldn’t read file details");
       const meta = await metaResp.json();
 
       // 2) content
-      const contentResp = await driveFileFetch(fileId, "?alt=media");
-      if (!contentResp.ok) throw new Error("Couldn’t download the file (" + contentResp.status + ").");
+      const contentResp = await driveFileFetch(fileId, "?alt=media", opts.publicOnly);
+      if (!contentResp.ok) throw httpError(contentResp.status, "Couldn’t download the file");
       const html = await contentResp.text();
 
       pendingFileId = null;   // the file is now open; nothing left pending
@@ -992,12 +1069,26 @@
       return true;
     } catch (err) {
       hideLoading();
+      // A cached token was rejected (expired / revoked) — drop it and reset to a
+      // signed-out prompt so the next click re-authenticates cleanly.
+      if (err.status === 401 && !opts.publicOnly) {
+        clearStoredToken();
+        accessToken = null;
+        signOutBtn.style.display = "none";
+        signInBtn.classList.remove("hidden");
+        signInBtn.disabled = false;
+        signInLabel.textContent = "Sign in with Google";
+      }
       // Quiet/silent callers (e.g. the public-preview probe) show their own
       // fallback UI instead of an error.
       if (opts.silentFail) return false;
       // Restore the panel so the error (and the other choices) are visible again.
       panel.classList.remove("hidden");
-      setStatus(err.message || "Something went wrong.", true);
+      setStatus(
+        err.status === 401 ? "Your session expired — please sign in again." :
+        (err.message || "Something went wrong."),
+        true
+      );
       return false;
     }
   }
@@ -1098,10 +1189,12 @@ Sharing a file:
   • You can also hand-build links: ?id=FILE_ID, or ?file=<full Drive URL>.
 
 Returning users:
-  • A boolean flag in localStorage ("dhp:returning") records that this browser
-    has signed in before, so the next visit attempts a no-UI token request
-    (prompt:"none") to restore the session with no popup. No token or file
-    content is ever stored; signing out clears the flag.
+  • The access token is cached in sessionStorage ("dhp:token", this tab only,
+    cleared on tab close) and reused on reload until it nears expiry — so a
+    refresh doesn't re-auth. A boolean flag in localStorage ("dhp:returning")
+    records that this browser has signed in before, so a fresh visit attempts a
+    no-UI token request (prompt:"none") to restore the session with no popup.
+    Signing out clears both; an expired/rejected token is dropped automatically.
 
 Security recap:
   • Scope is drive.file → the app only accesses your OWN files that you pick
@@ -1110,11 +1203,11 @@ Security recap:
   • The keyless public path only reaches files already shared "anyone with the
     link" — data anyone with the API key (which is public) could fetch anyway.
     It never touches private files.
-  • The iframe uses sandbox="allow-scripts" with NO allow-same-origin,
+  • The iframe uses sandbox="allow-scripts allow-forms" with NO allow-same-origin,
     so rendered HTML runs in a null origin and cannot read this app's
     tokens, cookies, or storage.
-  • Access tokens live in memory only; only the returning-user flag above is
-    persisted.
+  • The short-lived access token is cached only in sessionStorage (this tab);
+    no file content is persisted anywhere.
 ========================================================================
 -->
 </body>

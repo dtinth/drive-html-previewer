@@ -40,12 +40,17 @@ privately, with access still governed by Drive's own permissions.
   just the API key — no sign-in and no picker. Private files fall back to sign-in
   plus a one-click picker confirmation for that single file.
 - The selected file is fetched in the browser and rendered inside a sandboxed
-  `<iframe>` (scripts allowed, but no access to this page's data, cookies, or
-  sign-in token).
-- Access tokens live in memory only; the app never stores a token or any file
-  content. It keeps just one boolean flag in `localStorage` remembering that
-  you've signed in before, so a return visit can **restore your session
-  silently** (no popup). Signing out clears it.
+  `<iframe>` (scripts and form submission allowed, but — with no
+  `allow-same-origin` — the frame runs at a null origin and can't touch this
+  page's data, cookies, or sign-in token).
+- The app never stores any file content. To avoid re-authing on every visit it
+  keeps two small things, and nothing more:
+  - the short-lived access token in **`sessionStorage`** (this browser tab only,
+    cleared when the tab closes), reused on reload until it nears expiry; and
+  - a boolean flag in **`localStorage`** remembering you've signed in before, so
+    a return visit can **restore your session silently** (no popup).
+
+  Signing out clears both, and an expired/rejected token is dropped automatically.
 
 ### Sharing a file
 

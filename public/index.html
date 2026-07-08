@@ -555,9 +555,6 @@
   const CFG = window.APP_CONFIG;
   const SCOPE = "https://www.googleapis.com/auth/drive.file";
   const DRIVE_FILES = "https://www.googleapis.com/drive/v3/files/";
-  // Remembers only that this browser has signed in before (a boolean) so a
-  // return visit can restore the session silently. Never holds a token.
-  const RETURNING_KEY = "dhp:returning";
   // Caches the short-lived access token in sessionStorage (this tab only,
   // cleared when the tab closes) so a reload reuses it instead of re-authing.
   const TOKEN_KEY = "dhp:token";
@@ -678,9 +675,6 @@
   let currentBlobUrl = null;
   let currentFileId = null;
   let pendingFileId = null;   // file id parsed from the share link, loaded after auth
-  let silentInFlight = false; // true while a no-UI (prompt:"none") token request is pending
-  let silentTried = false;    // ensures the on-load silent sign-in runs at most once
-  let wantPicker = false;     // an explicit user action is waiting to open the picker post-auth
   pendingFileId = parseFileIdFromUrl();
 
   // Reuse a still-valid token cached earlier this tab session so a reload
@@ -771,6 +765,7 @@
         client_id: CFG.CLIENT_ID,
         scope: SCOPE,
         callback: onToken,
+        error_callback: onTokenError,
       });
     }
     if (!gapiLoaded && window.gapi) {
@@ -783,8 +778,6 @@
       });
     }
     if (gisLoaded) whenReady();
-    // Returning users: restore the session with no popup as soon as GIS is up.
-    maybeSilentSignIn();
     if (gisLoaded && gapiLoaded) {
       clearInterval(readyTimer);
     } else if (++readyTries >= READY_MAX_TRIES) {
@@ -794,17 +787,12 @@
   }, READY_POLL_MS);
 
   // ---- Auth ----
-  // Explicit, user-initiated sign-in that should flow straight into the picker.
-  // Records the intent (wantPicker) so the token callback opens the picker even
-  // if an on-load silent request is still in flight — otherwise the silent
-  // request's callback would be misread as "just restore" and swallow the click.
+  // Explicit, user-initiated sign-in. MUST run synchronously inside the click's
+  // user gesture — calling requestAccessToken outside a gesture makes the
+  // browser block the sign-in popup.
   function requestSignIn() {
     if (!tokenClient) return;
-    wantPicker = true;
     setBusy("Opening Google sign-in…");
-    // A silent (prompt:"none") request is already pending — let its callback
-    // resolve and honor wantPicker instead of firing a second, competing one.
-    if (silentInFlight) return;
     // No "consent" prompt: if the user already granted drive.file access, the
     // popup confirms the existing grant and closes immediately instead of
     // showing the full re-consent screen.
@@ -813,24 +801,12 @@
 
   signInBtn.addEventListener("click", () => {
     if (accessToken) {
-      // Already signed in (e.g. a silent restore) — skip auth, open the picker.
+      // Already signed in (token cached this session) — skip auth, open the picker.
       openPicker(pendingFileId || undefined);
       return;
     }
     requestSignIn();
   });
-
-  // Remember (only) that this browser has signed in, so a return visit can
-  // restore the session silently. No token or file content is ever stored.
-  function rememberReturning() {
-    try { localStorage.setItem(RETURNING_KEY, "1"); } catch (_) {}
-  }
-  function isReturning() {
-    try { return localStorage.getItem(RETURNING_KEY) === "1"; } catch (_) { return false; }
-  }
-  function forgetReturning() {
-    try { localStorage.removeItem(RETURNING_KEY); } catch (_) {}
-  }
 
   // ---- Access-token cache (sessionStorage, this tab only) ----
   function storeToken(token, expiresInSec) {
@@ -852,20 +828,6 @@
     try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
   }
 
-  // For a returning user, request a token with no UI at all. It succeeds only
-  // if they're still signed into Google and previously granted the scope;
-  // otherwise onToken gets an error we ignore silently.
-  function maybeSilentSignIn() {
-    if (silentTried || accessToken || !tokenClient || !isReturning()) return;
-    silentTried = true;
-    silentInFlight = true;
-    try {
-      tokenClient.requestAccessToken({ prompt: "none" });
-    } catch (_) {
-      silentInFlight = false;
-    }
-  }
-
   // Reflect signed-in state in the chrome without opening a picker.
   function applySignedIn() {
     setStatus("");
@@ -882,30 +844,13 @@
   }
 
   function onToken(resp) {
-    const wasSilent = silentInFlight;
-    silentInFlight = false;
     if (resp.error) {
-      if (wasSilent && wantPicker) {
-        // The user clicked while the silent request was in flight, and the
-        // silent one failed (not eligible) — now run the interactive flow.
-        setBusy("Opening Google sign-in…");
-        tokenClient.requestAccessToken({ prompt: "" });
-      } else if (!wasSilent) {
-        // An interactive attempt failed (popup closed, denied, …).
-        setStatus("Sign-in failed: " + resp.error, true);
-      }
-      // A purely silent failure (logged out / grant revoked) is expected — stay quiet.
+      setStatus("Sign-in failed: " + resp.error, true);
       return;
     }
     accessToken = resp.access_token;
     storeToken(resp.access_token, resp.expires_in);
-    rememberReturning();
     applySignedIn();
-
-    // No pending user intent: this was a silent restore — leave them where they
-    // are rather than popping a picker unprompted.
-    if (!wantPicker) return;
-    wantPicker = false;
 
     if (pendingFileId) {
       const id = pendingFileId;
@@ -919,16 +864,28 @@
     }
   }
 
+  // GIS fires this when requestAccessToken can't complete — most importantly
+  // when the browser blocks the popup. Clears the "Opening…" status so the UI
+  // doesn't hang, and tells the user how to recover.
+  function onTokenError(err) {
+    const type = err && err.type;
+    if (type === "popup_failed_to_open") {
+      setStatus("Your browser blocked the Google sign-in popup. Allow pop-ups for this site, then click again.", true);
+    } else if (type === "popup_closed") {
+      setStatus("Sign-in was cancelled.", true);
+    } else {
+      setStatus("Couldn’t open Google sign-in. Please try again.", true);
+    }
+  }
+
   signOutBtn.addEventListener("click", () => {
     if (accessToken && window.google && google.accounts && google.accounts.oauth2) {
       google.accounts.oauth2.revoke(accessToken, () => {});
     }
     accessToken = null;
     currentFileId = null;
-    // Drop the cached token and don't silently sign back in — this visit or the next.
+    // Drop the cached token so a reload doesn't restore the session.
     clearStoredToken();
-    forgetReturning();
-    silentTried = true;
     clearView();
     signOutBtn.style.display = "none";
     pickBtn.disabled = true;
@@ -1191,10 +1148,11 @@ Sharing a file:
 Returning users:
   • The access token is cached in sessionStorage ("dhp:token", this tab only,
     cleared on tab close) and reused on reload until it nears expiry — so a
-    refresh doesn't re-auth. A boolean flag in localStorage ("dhp:returning")
-    records that this browser has signed in before, so a fresh visit attempts a
-    no-UI token request (prompt:"none") to restore the session with no popup.
-    Signing out clears both; an expired/rejected token is dropped automatically.
+    refresh doesn't re-auth. Signing out clears it, and an expired/rejected
+    token is dropped automatically.
+  • Sign-in itself is always user-initiated: requestAccessToken runs inside the
+    click handler so the browser doesn't block the popup. (No on-load silent
+    token request — that would be a gesture-less popup and get blocked.)
 
 Security recap:
   • Scope is drive.file → the app only accesses your OWN files that you pick

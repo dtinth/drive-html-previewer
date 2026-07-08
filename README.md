@@ -43,14 +43,13 @@ privately, with access still governed by Drive's own permissions.
   `<iframe>` (scripts and form submission allowed, but — with no
   `allow-same-origin` — the frame runs at a null origin and can't touch this
   page's data, cookies, or sign-in token).
-- The app never stores any file content. To avoid re-authing on every visit it
-  keeps two small things, and nothing more:
-  - the short-lived access token in **`sessionStorage`** (this browser tab only,
-    cleared when the tab closes), reused on reload until it nears expiry; and
-  - a boolean flag in **`localStorage`** remembering you've signed in before, so
-    a return visit can **restore your session silently** (no popup).
-
-  Signing out clears both, and an expired/rejected token is dropped automatically.
+- The app never stores any file content. To avoid re-authing on every reload it
+  caches only the short-lived access token in **`sessionStorage`** (this browser
+  tab only, cleared when the tab closes) and reuses it until it nears expiry.
+  Signing out clears it, and an expired/rejected token is dropped automatically.
+- Signing in is always triggered by your click — the Google popup is opened
+  inside the click handler so the browser doesn't block it. (There's no on-load
+  silent sign-in, which would be a gesture-less popup and get blocked.)
 
 ### Sharing a file
 

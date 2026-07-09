@@ -930,6 +930,9 @@
     const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
       .setMimeTypes("text/html")
       .setMode(google.picker.DocsViewMode.LIST);
+    // Surface Shared Drives in the picker too (not just "My Drive"), so files
+    // that live in a Shared Drive can be selected.
+    if (typeof view.setEnableDrives === "function") view.setEnableDrives(true);
 
     // Pre-navigate the picker to a specific file (rolled out Jan 2025).
     // The user grants drive.file access to just this file in one click.
@@ -965,9 +968,11 @@
   // Fetch a Drive file resource. Uses the signed-in token when we have one,
   // otherwise (or when publicOnly is set) falls back to the API key — which
   // works for files shared as "anyone with the link".
-  // `query` always begins with "?", so appending "&key=" is safe.
+  // `query` always begins with "?", so appending "&…" is safe.
+  // supportsAllDrives=true is required or files that live in a Shared Drive
+  // 404 on both metadata and download.
   function driveFileFetch(fileId, query, publicOnly) {
-    const url = DRIVE_FILES + encodeURIComponent(fileId) + query;
+    const url = DRIVE_FILES + encodeURIComponent(fileId) + query + "&supportsAllDrives=true";
     if (accessToken && !publicOnly) {
       return fetch(url, { headers: { Authorization: "Bearer " + accessToken } });
     }

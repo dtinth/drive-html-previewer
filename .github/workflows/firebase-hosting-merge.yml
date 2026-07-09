@@ -1,0 +1,53 @@
+# Deploys public/ to the live Firebase Hosting channel whenever main updates.
+#
+# Auth is keyless via GitHub OIDC → Google Cloud Workload Identity Federation:
+# no secrets at all. The provider path and service-account email below are not
+# secrets — they're public identifiers; access is gated by the provider's
+# attribute condition (repository == this repo) plus the SA's IAM binding.
+# See the README "Continuous deployment" section for the one-time GCP setup.
+name: Deploy to Firebase Hosting on merge
+
+on:
+  push:
+    branches:
+      - main
+  # Allow manual re-deploys from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required so the runner can mint an OIDC token
+
+jobs:
+  deploy_live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mint a short-lived OAuth access token via OIDC → Workload Identity
+      # Federation. token_format:access_token is required because firebase-tools
+      # doesn't accept the WIF `external_account` credentials file (its ADC
+      # support only handles classic service-account key files) — so we hand the
+      # CLI the access token directly via FIREBASE_TOKEN instead.
+      - name: Authenticate to Google Cloud (OIDC, keyless)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: drive-html-previewer
+          workload_identity_provider: projects/872159808085/locations/global/workloadIdentityPools/github/providers/github
+          service_account: github-deployer@drive-html-previewer.iam.gserviceaccount.com
+          token_format: access_token
+          create_credentials_file: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Deploy to live channel
+        env:
+          FIREBASE_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: >-
+          npx --yes firebase-tools@latest deploy
+          --only hosting
+          --project drive-html-previewer
+          --non-interactive

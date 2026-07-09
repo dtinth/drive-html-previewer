@@ -111,6 +111,61 @@ See [Google Drive API — Usage limits](https://developers.google.com/workspace/
 
 ## Deploy
 
+### Continuous deployment (GitHub Actions)
+
+Pushing to `main` deploys `public/` to the live Firebase Hosting channel via
+[`.github/workflows/firebase-hosting-merge.yml`](.github/workflows/firebase-hosting-merge.yml);
+each pull request gets a temporary preview channel (URL posted as a PR comment)
+via [`firebase-hosting-pull-request.yml`](.github/workflows/firebase-hosting-pull-request.yml).
+
+Auth is **keyless and secret-free** — GitHub Actions exchanges a short-lived
+OIDC token for Google Cloud credentials via Workload Identity Federation. No
+service-account key, and **nothing to configure in GitHub**: the provider path
+and service-account email are committed directly in the workflows (they're
+public identifiers, not secrets — access is gated by the provider's attribute
+condition, which only trusts tokens from this repository).
+
+One-time setup (run once with the [`gcloud`](https://cloud.google.com/sdk/docs/install)
+CLI, authenticated as a project owner):
+
+```sh
+PROJECT_ID=drive-html-previewer
+PROJECT_NUMBER=872159808085                 # gcloud projects describe $PROJECT_ID --format='value(projectNumber)'
+REPO=dtinth/drive-html-previewer            # owner/repo
+SA=github-deployer@$PROJECT_ID.iam.gserviceaccount.com
+
+# 0. Enable the APIs the pipeline needs. iamcredentials is required to mint the
+#    short-lived access token from the federated identity (SA impersonation).
+gcloud services enable iamcredentials.googleapis.com firebasehosting.googleapis.com --project="$PROJECT_ID"
+
+# 1. A deployer service account with permission to deploy Hosting.
+gcloud iam service-accounts create github-deployer --project="$PROJECT_ID"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$SA" --role="roles/firebasehosting.admin"
+
+# 2. A Workload Identity pool + GitHub OIDC provider, locked to this repo.
+gcloud iam workload-identity-pools create github \
+  --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
+gcloud iam workload-identity-pools providers create-oidc github \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool=github \
+  --display-name="GitHub OIDC" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository=='$REPO'"
+
+# 3. Let this repo impersonate the deployer SA.
+gcloud iam service-accounts add-iam-policy-binding "$SA" --project="$PROJECT_ID" \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/$REPO"
+```
+
+That's the whole setup — no GitHub secrets to add. The workflows already
+reference this provider and service account by name, so the next push to `main`
+deploys automatically. (If you use different names or another project, update
+`workload_identity_provider` / `service_account` in the two workflow files.)
+
+### Manual deploy
+
 ```sh
 npx firebase-tools deploy --only hosting
 ```

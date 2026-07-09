@@ -22,7 +22,7 @@ jobs:
   deploy_live:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Mint a short-lived OAuth access token via OIDC → Workload Identity
       # Federation. token_format:access_token is required because firebase-tools
@@ -31,7 +31,7 @@ jobs:
       # CLI the access token directly via FIREBASE_TOKEN instead.
       - name: Authenticate to Google Cloud (OIDC, keyless)
         id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           project_id: drive-html-previewer
           workload_identity_provider: projects/872159808085/locations/global/workloadIdentityPools/github/providers/github
@@ -39,13 +39,17 @@ jobs:
           token_format: access_token
           create_credentials_file: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Deploy to live channel
         env:
           FIREBASE_TOKEN: ${{ steps.auth.outputs.access_token }}
+          # Keep the log warning-free: quiet npm's transitive-dep deprecation
+          # notices and the punycode deprecation emitted from a firebase-tools dep.
+          npm_config_loglevel: error
+          NODE_OPTIONS: --disable-warning=DEP0040
         run: >-
           npx --yes firebase-tools@latest deploy
           --only hosting
